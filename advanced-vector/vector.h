@@ -235,7 +235,6 @@ public:
 	}
 	template <typename... Args>
 	T& EmplaceBack(Args&&... args) {
-		assert(pos >= cbegin() && pos <= cend());
 		if (size_ == Capacity()) {
 			size_t new_capacity;
 			size_ == 0 ? new_capacity = 1 : new_capacity = size_ * 2;
