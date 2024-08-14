@@ -19,15 +19,12 @@ public:
 
 	RawMemory(const RawMemory& other) = delete;
 	RawMemory& operator=(const RawMemory& other) = delete;
-	RawMemory(RawMemory&& other) :
-		buffer_(std::exchange(other.buffer_, nullptr)),
-		capacity_(std::exchange(other.capacity_, 0)) {
+	RawMemory(RawMemory&& other) noexcept {
+		Swap(other);
 	}
-
 	RawMemory& operator=(RawMemory&& other) noexcept {
 		if (this != &other) {
-			buffer_ = std::exchange(other.buffer_, nullptr); // можно и swap?
-			capacity_ = std::exchange(other.capacity_, 0);
+			Swap(other);
 		}
 		return *this;
 	}
@@ -37,7 +34,6 @@ public:
 	}
 
 	T* operator+(size_t offset) noexcept {
-		// Разрешается получать адрес ячейки памяти, следующей за последним элементом массива
 		assert(offset <= capacity_);
 		return buffer_ + offset;
 	}
@@ -73,12 +69,10 @@ public:
 	}
 
 private:
-	// Выделяет сырую память под n элементов и возвращает указатель на неё
 	static T* Allocate(size_t n) {
 		return n != 0 ? static_cast<T*>(operator new(n * sizeof(T))) : nullptr;
 	}
 
-	// Освобождает сырую память, выделенную ранее по адресу buf при помощи Allocate
 	static void Deallocate(T* buf) noexcept {
 		operator delete(buf);
 	}
@@ -124,9 +118,8 @@ public:
 		std::uninitialized_copy_n(other.data_.GetAddress(), size_, data_.GetAddress());
 	}
 
-	Vector(Vector&& other) noexcept :
-		data_(std::move(other.data_)),
-		size_(std::exchange(other.size_, 0)) {
+	Vector(Vector&& other) noexcept {
+		Swap(other);
 	}
 
 	Vector& operator=(const Vector& rhs) {
@@ -136,16 +129,7 @@ public:
 				Swap(tmp);
 			}
 			else {
-				for (size_t i = 0; i < std::min(rhs.size_, size_); ++i) {
-					data_[i] = rhs.data_[i];
-				}
-				if (rhs.size_ <= size_) {
-					std::destroy_n(data_.GetAddress() + rhs.size_, size_ - rhs.size_);
-				}
-				else {
-					std::uninitialized_copy_n(rhs.data_.GetAddress() + size_, rhs.size_ - size_, data_.GetAddress() + size_);
-				}
-				size_ = rhs.size_;
+				CopyLessVector(rhs);
 			}
 		}
 		return *this;
@@ -195,33 +179,23 @@ public:
 
 	template <typename... Args>
 	iterator Emplace(const_iterator pos, Args&&... args) {
+		assert(pos >= cbegin() && pos <= cend());
 		size_t distance = std::distance(cbegin(), pos);
 		if (size_ == Capacity()) {
 			size_t new_capacity;
 			size_ == 0 ? new_capacity = 1 : new_capacity = size_ * 2;
 			RawMemory<T> new_data(new_capacity);
 			new(new_data + distance) T(std::forward<Args>(args)...);
-			try {
-				if constexpr (!std::is_copy_constructible_v<T> || std::is_nothrow_move_constructible_v<T>) {
-					std::uninitialized_move(begin(), begin() + distance, new_data.GetAddress());
-
-				}
-				else {
-					std::uninitialized_copy(begin(), begin() + distance, new_data.GetAddress());
-				}
+			try { // или надо try, catch также реализовать в этом методе (что по мне будет странно и не особо понятно, потому что в первом случае
+				// деструктор будет вызван для одного объекта, во втором для n количества)? Есть идея для 2 try catch: добавить их в ещё 1 приватный метод
+				InitializedNewData(begin(), begin() + distance, new_data.GetAddress()); 
 			}
 			catch (...) {
 				std::destroy_at(new_data.GetAddress() + distance);
 				throw;
 			}
 			try {
-				if constexpr (!std::is_copy_constructible_v<T> || std::is_nothrow_move_constructible_v<T>) {
-					std::uninitialized_move(begin() + distance, end(), new_data.GetAddress() + distance + 1);
-
-				}
-				else {
-					std::uninitialized_copy(begin() + distance, end(), new_data.GetAddress() + distance + 1);
-				}
+				InitializedNewData(begin() + distance, end(), new_data.GetAddress() + distance + 1);
 			}
 			catch (...) {
 				std::destroy_n(new_data.GetAddress(), distance);
@@ -251,10 +225,6 @@ public:
 		return data_ + distance;
 	}
 
-	template <typename... Args>
-	T& EmplaceBack(Args&&... args) {
-		return *Emplace(cend(), std::forward<Args>(args)...);
-	}
 
 	iterator Insert(const_iterator pos, const T& value) {
 		return Emplace(pos, value);
@@ -263,19 +233,39 @@ public:
 	iterator Insert(const_iterator pos, T&& value) {
 		return Emplace(pos, std::move(value));
 	}
+	template <typename... Args>
+	T& EmplaceBack(Args&&... args) {
+		assert(pos >= cbegin() && pos <= cend());
+		if (size_ == Capacity()) {
+			size_t new_capacity;
+			size_ == 0 ? new_capacity = 1 : new_capacity = size_ * 2;
+			RawMemory<T> new_data(new_capacity);
+			new(new_data + size_) T(std::forward<Args>(args)...);
+			try {
+				InitializedNewData(begin(), begin() + size_, new_data.GetAddress());
+			}
+			catch (...) {
+				std::destroy_at(new_data.GetAddress() + size_);
+			}
+			std::destroy_n(data_.GetAddress(), size_);
+			data_.Swap(new_data);
+		}
+		else {
+			new(data_ + size_) T(std::forward<Args>(args)...);
+		}
+		++size_;
+		return *(data_ + size_ - 1);
+	}
 
-	//void PushBack(const T& value) {
-	//	EmplaceBack(value);
-	//}
-	//void PushBack(T&& value) {
-	//	EmplaceBack(std::move(value));
-	//}
-	template<typename Val>
-	void PushBack(Val&& value) {
-		EmplaceBack(std::forward<Val>(value));
+	void PushBack(const T& value) {
+		EmplaceBack(value);
+	}
+	void PushBack(T&& value) {
+		EmplaceBack(std::move(value));
 	}
 
 	void PopBack() noexcept {
+		assert(size_ != 0);
 		std::destroy_at(data_.GetAddress() + size_ -1);
 		--size_;
 	}
@@ -283,13 +273,7 @@ public:
 	void Reserve(size_t capacity) {
 		if (capacity > data_.Capacity()) {
 			RawMemory<T> new_data(capacity);
-			if constexpr (!std::is_copy_constructible_v<T> || std::is_nothrow_move_constructible_v<T>) {
-				std::uninitialized_move_n(data_.GetAddress(), size_, new_data.GetAddress());
-
-			}
-			else {
-				std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
-			}
+			InitializedNewData(data_.GetAddress(), data_.GetAddress() + size_, new_data.GetAddress());
 			std::destroy_n(data_.GetAddress(), size_);
 			data_.Swap(new_data);
 		}
@@ -301,6 +285,7 @@ public:
 	}
 
 	iterator Erase(const_iterator pos) {
+		assert(pos >= cbegin() && pos <= cend());
 		size_t distance = std::distance(cbegin(),pos);
 		std::move(begin() + distance + 1, end(), begin() + distance);
 		std::destroy_at(data_.GetAddress() + size_ - 1);
@@ -311,4 +296,25 @@ public:
 private:
 	RawMemory<T> data_;
 	size_t size_ = 0;
+
+	void CopyLessVector(const Vector& other) {
+		std::copy(other.begin(), other.begin() + std::min(other.size_, size_), begin());
+		if (other.size_ <= size_) {
+			std::destroy_n(data_.GetAddress() + other.size_, size_ - other.size_);
+		}
+		else {
+			std::uninitialized_copy_n(other.data_.GetAddress() + size_, other.size_ - size_, data_.GetAddress() + size_);
+		}
+		size_ = other.size_;
+	}
+
+	void InitializedNewData(iterator first, iterator last, iterator d_first) {
+		if constexpr (!std::is_copy_constructible_v<T> || std::is_nothrow_move_constructible_v<T>) {
+			std::uninitialized_move(first, last, d_first);
+
+		}
+		else {
+			std::uninitialized_copy(first, last, d_first);
+		}
+	}
 };
