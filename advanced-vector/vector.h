@@ -186,8 +186,7 @@ public:
 			size_ == 0 ? new_capacity = 1 : new_capacity = size_ * 2;
 			RawMemory<T> new_data(new_capacity);
 			new(new_data + distance) T(std::forward<Args>(args)...);
-			try { // или надо try, catch также реализовать в этом методе (что по мне будет странно и не особо понятно, потому что в первом случае
-				// деструктор будет вызван для одного объекта, во втором для n количества)? Есть идея для 2 try catch: добавить их в ещё 1 приватный метод
+			try {
 				InitializedNewData(begin(), begin() + distance, new_data.GetAddress()); 
 			}
 			catch (...) {
